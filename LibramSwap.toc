@@ -1,0 +1,5 @@
+## Interface: 11200
+## Title: LibramSwap
+## Notes: Swaps to correct libram before casting Paladin spells
+## Author: Theo
+LibramSwap.lua
