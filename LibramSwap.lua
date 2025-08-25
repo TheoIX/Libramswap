@@ -24,7 +24,7 @@ local lastSwapTime = 0
 -- Config
 -- =====================
 -- If you still notice micro stutter in 40-mans, try raising to 1.4–1.6
-local SWAP_THROTTLE = 1.2
+local SWAP_THROTTLE = 1.48
 
 -- Map spells -> preferred libram name (bag/equipped link substring match)
 local LibramMap = {
@@ -77,6 +77,20 @@ end
 -- =====================
 -- Helpers
 -- =====================
+
+-- Add this near your other locals/helpers:
+local function IsInteractionBusy()
+    -- Block swaps when any UI that reinterprets right-clicks is open
+    return (MerchantFrame and MerchantFrame:IsVisible())
+        or (BankFrame and BankFrame:IsVisible())
+        or (AuctionFrame and AuctionFrame:IsVisible())
+        or (TradeFrame and TradeFrame:IsVisible())
+        or (MailFrame and MailFrame:IsVisible())
+        or (QuestFrame and QuestFrame:IsVisible())
+        or (GossipFrame and GossipFrame:IsVisible())
+end
+
+
 local function HasItemInBags(itemName)
     for bag = 0, 4 do
         local slots = GetContainerNumSlots(bag)
@@ -97,6 +111,12 @@ local function EquipLibram(itemName)
     local equipped = GetInventoryItemLink("player", 17)
     if equipped and string_find(equipped, itemName, 1, true) then
         lastEquippedLibram = itemName
+        return false
+    end
+
+    -- NEW: Safety guard — never swap while vendor/bank/auction/etc. is open
+    if IsInteractionBusy() then
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFFF5555[LibramSwap]: Swap blocked (vendor/bank/auction/trade/mail/quest window open).|r")
         return false
     end
 
