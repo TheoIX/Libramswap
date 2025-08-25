@@ -34,7 +34,7 @@ local lastSwapTime = 0
 -- Config
 -- =====================
 -- If you still notice micro stutter in 40-mans, try raising to 1.4–1.6
-local SWAP_THROTTLE = 1.2
+local SWAP_THROTTLE = 1.48
 
 -- Consecration libram choices
 local CONSECRATION_FAITHFUL = "Libram of the Faithful"
