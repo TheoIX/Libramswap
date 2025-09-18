@@ -1,6 +1,7 @@
 -- LibramSwap.lua (Turtle WoW 1.12)
 -- Swaps librams for specific spells, but ONLY when the spell is ready (no CD/GCD).
--- Uses a 1.12-safe IsSpellReady() and avoids retail-era APIs.
+-- Adds Judgement gating (only swap ≤35% target HP) and per-spell throttles that
+-- start AFTER the first successful swap for that spell.
 
 -- =====================
 -- Locals / Aliases
@@ -28,13 +29,23 @@ end
 
 local LibramSwapEnabled = false
 local lastEquippedLibram = nil
+
+-- Global (generic) throttle for GCD-based swaps
 local lastSwapTime = 0
 
 -- =====================
 -- Config
 -- =====================
--- If you still notice micro stutter in 40-mans, try raising to 1.4–1.6
-local SWAP_THROTTLE = 1.48
+-- Keep original generic throttle for GCD spells
+local SWAP_THROTTLE_GENERIC = 1.48
+
+-- Per-spell throttles (begin applying AFTER the first successful swap of that spell)
+local PER_SPELL_THROTTLE = {
+    ["Crusader Strike"] = 5.4,
+    ["Holy Strike"]     = 5.4,
+    ["Consecration"]    = 7.8,
+    ["Judgement"]       = 7.8,
+}
 
 -- Consecration libram choices
 local CONSECRATION_FAITHFUL = "Libram of the Faithful"
@@ -55,6 +66,7 @@ local LibramMap = {
     ["Hand of Freedom"]               = "Libram of the Resolute",
     ["Crusader Strike"]               = "Libram of the Eternal Tower",
     ["Holy Strike"]                   = "Libram of the Eternal Tower",
+    ["Judgement"]                     = "Libram of Final Judgement",
     ["Seal of Wisdom"]                = "Libram of Hope",
     ["Seal of Light"]                 = "Libram of Hope",
     ["Seal of Justice"]               = "Libram of Hope",
@@ -62,13 +74,18 @@ local LibramMap = {
     ["Seal of the Crusader"]          = "Libram of Fervor",
     ["Seal of Righteousness"]         = "Libram of Hope",
     ["Devotion Aura"]                 = "Libram of Truth",
-    ["Blessing of Might"]             = "Libram of Veracity",
+    ["Concentration Aura"]            = "Libram of Truth",
+    ["Retribution Aura"]              = "Libram of Truth",
+    ["Sanctity Aura"]                 = "Libram of Truth",
+    ["Fire Resistance Aura"]          = "Libram of Truth",
+    ["Frost Resistance Aura"]         = "Libram of Truth",
+    ["Shadow Resistance Aura"]        = "Libram of Truth",
     ["Blessing of Wisdom"]            = "Libram of Veracity",
+    ["Blessing of Might"]             = "Libram of Veracity",
     ["Blessing of Kings"]             = "Libram of Veracity",
     ["Blessing of Sanctuary"]         = "Libram of Veracity",
     ["Blessing of Light"]             = "Libram of Veracity",
     ["Blessing of Salvation"]         = "Libram of Veracity",
-    ["Greater Blessing of Might"]     = "Libram of Veracity",
     ["Greater Blessing of Wisdom"]    = "Libram of Veracity",
     ["Greater Blessing of Kings"]     = "Libram of Veracity",
     ["Greater Blessing of Sanctuary"] = "Libram of Veracity",
@@ -114,7 +131,20 @@ local function HasItemInBags(itemName)
     return nil
 end
 
-local function EquipLibram(itemName)
+-- Returns target HP% (number) or nil if no valid target
+local function TargetHealthPct()
+    if not UnitExists("target") or UnitIsDeadOrGhost("target") then return nil end
+    local maxHP = UnitHealthMax("target")
+    if not maxHP or maxHP == 0 then return nil end
+    return (UnitHealth("target") / maxHP) * 100
+end
+
+-- Per-spell throttle state
+local perSpellHasSwapped = {}   -- spellName -> true after first successful swap
+local perSpellLastSwap   = {}   -- spellName -> last swap time (after first)
+
+-- Core equip with throttle policy
+local function EquipLibramForSpell(spellName, itemName)
     -- Already equipped?
     local equipped = GetInventoryItemLink("player", 17)
     if equipped and string_find(equipped, itemName, 1, true) then
@@ -128,10 +158,22 @@ local function EquipLibram(itemName)
         return false
     end
 
-    -- Throttle swaps
+    -- Throttle selection
     local now = GetTime()
-    if (now - lastSwapTime) < SWAP_THROTTLE then
-        return false
+    local perDur = PER_SPELL_THROTTLE[spellName]
+    if perDur then
+        -- Apply throttle ONLY after the first successful swap for this spell
+        if perSpellHasSwapped[spellName] then
+            local last = perSpellLastSwap[spellName] or 0
+            if (now - last) < perDur then
+                return false
+            end
+        end
+    else
+        -- Generic GCD-based throttle for other spells
+        if (now - lastSwapTime) < SWAP_THROTTLE_GENERIC then
+            return false
+        end
     end
 
     local bag, slot = HasItemInBags(itemName)
@@ -141,9 +183,17 @@ local function EquipLibram(itemName)
         end
         UseContainerItem(bag, slot)
         lastEquippedLibram = itemName
-        lastSwapTime = now
+        if perDur then
+            -- mark first swap and update per-spell timestamp
+            if not perSpellHasSwapped[spellName] then
+                perSpellHasSwapped[spellName] = true
+            end
+            perSpellLastSwap[spellName] = now
+        else
+            lastSwapTime = now
+        end
         -- Reduce spam if desired by commenting this out
-        DEFAULT_CHAT_FRAME:AddMessage("|cFFAAAAFF[LibramSwap]: Equipped|r " .. itemName)
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFAAAAFF[LibramSwap]: Equipped|r " .. itemName .. " |cFF888888(" .. spellName .. ")|r")
         return true
     end
     return false
@@ -190,7 +240,14 @@ function CastSpellByName(spellName, bookType)
         if libram then
             local ready = IsSpellReady(spellName)
             if ready then
-                EquipLibram(libram)
+                if spellName == "Judgement" then
+                    local hp = TargetHealthPct()
+                    if hp and hp <= 35 then
+                        EquipLibramForSpell(spellName, libram)
+                    end
+                else
+                    EquipLibramForSpell(spellName, libram)
+                end
             end
         end
     end
@@ -206,7 +263,14 @@ function CastSpell(spellIndex, bookType)
             if libram then
                 local ready = IsSpellReady(name)
                 if ready then
-                    EquipLibram(libram)
+                    if name == "Judgement" then
+                        local hp = TargetHealthPct()
+                        if hp and hp <= 35 then
+                            EquipLibramForSpell(name, libram)
+                        end
+                    else
+                        EquipLibramForSpell(name, libram)
+                    end
                 end
             end
         end
@@ -245,4 +309,3 @@ SlashCmdList["CONSECLIBRAM"] = function(msg)
     local active = (LibramConsecrationMode == "farraki") and CONSECRATION_FARRAKI or CONSECRATION_FAITHFUL
     DEFAULT_CHAT_FRAME:AddMessage("|cFFAAAAFF[LibramSwap]: Consecration libram set to|r " .. active)
 end
-
