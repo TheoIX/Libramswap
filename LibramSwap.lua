@@ -15,6 +15,10 @@ local GetSpellCooldown      = GetSpellCooldown
 local GetTime               = GetTime
 local string_find           = string.find
 local BOOKTYPE_SPELL        = BOOKTYPE_SPELL or "spell"
+-- === Bag Index ===
+local NameIndex   = {}  -- [itemName] = {bag=#, slot=#, link="|Hitem:..|h[Name]|h|r"}
+local IdIndex     = {}  -- [itemID]   = {bag=#, slot=#, link=...}  (optional use later)
+local reindexQueued = false
 
 -- Safety: block swaps when vendor/bank/auction/trade/mail/quest/gossip is open
 local function IsInteractionBusy()
@@ -41,9 +45,6 @@ local SWAP_THROTTLE_GENERIC = 1.48
 
 -- Per-spell throttles (begin applying AFTER the first successful swap of that spell)
 local PER_SPELL_THROTTLE = {
-    ["Crusader Strike"] = 5.4,
-    ["Holy Strike"]     = 5.4,
-    ["Consecration"]    = 7.8,
     ["Judgement"]       = 7.8,
 }
 
@@ -93,6 +94,65 @@ local LibramMap = {
     ["Greater Blessing of Salvation"] = "Libram of Veracity",
 }
 
+
+local WatchedNames = {}
+do
+    -- From LibramMap keys
+    for _, name in pairs(LibramMap) do
+        WatchedNames[name] = true
+    end
+    -- Consecration options
+    WatchedNames[CONSECRATION_FAITHFUL] = true
+    WatchedNames[CONSECRATION_FARRAKI]  = true
+end
+
+-- Extract numeric itemID from an item link (1.12 safe)
+local function ItemIDFromLink(link)
+    if not link then return nil end
+   local _, _, id = string.find(link, "item:(%d+)")
+return id and tonumber(id) or nil
+end
+
+local function BuildBagIndex()
+    -- wipe current
+    for k in pairs(NameIndex) do NameIndex[k] = nil end
+    for k in pairs(IdIndex)   do IdIndex[k]   = nil end
+
+    for bag = 0, 4 do
+        local slots = GetContainerNumSlots(bag)
+        if slots and slots > 0 then
+            for slot = 1, slots do
+                local link = GetContainerItemLink(bag, slot)
+                if link then
+                    -- Extract plain item name safely
+                    local _, _, bracketName = string.find(link, "%[(.-)%]")
+                    if bracketName and WatchedNames[bracketName] then
+                        NameIndex[bracketName] = { bag = bag, slot = slot, link = link }
+                        local id = ItemIDFromLink(link)
+                        if id then
+                            IdIndex[id] = { bag = bag, slot = slot, link = link }
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+local LibramSwapFrame = CreateFrame("Frame")
+LibramSwapFrame:RegisterEvent("PLAYER_LOGIN")
+LibramSwapFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+LibramSwapFrame:RegisterEvent("BAG_UPDATE")
+
+LibramSwapFrame:SetScript("OnEvent", function(_, event)
+    if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
+        BuildBagIndex()
+    elseif event == "BAG_UPDATE" then
+        -- simple & safe: rebuild immediately (cost is tiny since we only watch librams)
+        BuildBagIndex()
+    end
+end)
+
 -- =====================
 -- Spell Readiness (1.12-safe)
 -- =====================
@@ -116,13 +176,39 @@ end
 -- =====================
 -- Helpers
 -- =====================
+-- Returns bag, slot or nil
 local function HasItemInBags(itemName)
+    -- 1) Try cached slot first
+    local ref = NameIndex[itemName]
+    if ref then
+        local current = GetContainerItemLink(ref.bag, ref.slot)
+        if current and string.find(current, itemName, 1, true) then
+            return ref.bag, ref.slot
+        end
+        -- It moved; rebuild and try again
+        BuildBagIndex()
+        ref = NameIndex[itemName]
+        if ref then
+            local verify = GetContainerItemLink(ref.bag, ref.slot)
+            if verify and string.find(verify, itemName, 1, true) then
+                return ref.bag, ref.slot
+            end
+        end
+        return nil
+    end
+
+    -- 2) Slow path (first time seeing this name in-session)
+    --    We keep it for resiliency; BuildBagIndex will capture it for next time.
     for bag = 0, 4 do
         local slots = GetContainerNumSlots(bag)
         if slots and slots > 0 then
             for slot = 1, slots do
                 local link = GetContainerItemLink(bag, slot)
-                if link and string_find(link, itemName, 1, true) then
+                if link and string.find(link, itemName, 1, true) then
+                    -- Update cache so future lookups are O(1)
+                    NameIndex[itemName] = { bag = bag, slot = slot, link = link }
+                    local id = ItemIDFromLink(link)
+                    if id then IdIndex[id] = { bag = bag, slot = slot, link = link } end
                     return bag, slot
                 end
             end
@@ -146,7 +232,7 @@ local perSpellLastSwap   = {}   -- spellName -> last swap time (after first)
 -- Core equip with throttle policy
 local function EquipLibramForSpell(spellName, itemName)
     -- Already equipped?
-    local equipped = GetInventoryItemLink("player", 17)
+    local equipped = GetInventoryItemLink("player", 18)
     if equipped and string_find(equipped, itemName, 1, true) then
         lastEquippedLibram = itemName
         return false
@@ -307,6 +393,10 @@ SlashCmdList["CONSECLIBRAM"] = function(msg)
         return
     end
     local active = (LibramConsecrationMode == "farraki") and CONSECRATION_FARRAKI or CONSECRATION_FAITHFUL
+    DEFAULT_CHAT_FRAME:AddMessage("|cFFAAAAFF[LibramSwap]: Consecration libram set to|r " .. active)
+end
+
+
     DEFAULT_CHAT_FRAME:AddMessage("|cFFAAAAFF[LibramSwap]: Consecration libram set to|r " .. active)
 end
 
