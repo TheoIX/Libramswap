@@ -145,7 +145,7 @@ LibramSwapFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 LibramSwapFrame:RegisterEvent("BAG_UPDATE")
 LibramSwapFrame:RegisterEvent("ADDON_LOADED")
 
-LibramSwapFrame:SetScript("OnEvent", function(_, event)
+LibramSwapFrame:SetScript("OnEvent", function()
     if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
         BuildBagIndex()
     elseif event == "BAG_UPDATE" then
