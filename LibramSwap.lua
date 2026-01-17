@@ -131,6 +131,9 @@ local function BuildBagIndex()
     end
 end
 
+-- Forward declaration for optional Nampower hook (defined later)
+local HookNampowerIfPresent
+
 local LibramSwapFrame = CreateFrame("Frame")
 LibramSwapFrame:RegisterEvent("PLAYER_LOGIN")
 LibramSwapFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -139,6 +142,7 @@ LibramSwapFrame:RegisterEvent("BAG_UPDATE")
 LibramSwapFrame:SetScript("OnEvent", function(_, event)
     if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
         BuildBagIndex()
+        if HookNampowerIfPresent then HookNampowerIfPresent() end
     elseif event == "BAG_UPDATE" then
         -- simple & safe: rebuild immediately (cost is tiny since we only watch librams)
         BuildBagIndex()
@@ -320,21 +324,122 @@ local function ResolveLibramForSpell(spellName)
 end
 
 -- =====================
+-- Nampower compatibility (queued casts)
+-- =====================
+-- Pepo Nampower exposes custom Lua functions like QueueSpellByName/QueueScript.
+-- If QueueScript exists, we can queue the libram swap to run inside the same
+-- queue window as the spell, so queued casts still get the correct libram.
+
+local function SpellHasLibramMapping(spellBase)
+    if not spellBase then return false end
+    if spellBase == "Consecration" then return true end
+    return (LibramMap[spellBase] ~= nil)
+end
+
+local function HasNampowerQueue()
+    return (type(QueueScript) == "function")
+end
+
+-- Global on purpose: Nampower's QueueScript executes a string in the global environment.
+function LibramSwap_QueueTryEquip(spellBase)
+    if not LibramSwapEnabled then return end
+    if type(spellBase) ~= "string" or spellBase == "" then return end
+
+    local libram = ResolveLibramForSpell(spellBase)
+    if not libram then return end
+
+    if spellBase == "Judgement" then
+        local hp = TargetHealthPct()
+        if not hp or hp > 35 then return end
+    end
+
+    EquipLibramForSpell(spellBase, libram)
+end
+
+local function QueueLibramSwap(spellBase)
+    if not HasNampowerQueue() then return false end
+    -- Priority 1 => run before queued spells
+    QueueScript(string.format("LibramSwap_QueueTryEquip(%q)", spellBase), 1)
+    return true
+end
+
+local nampowerHooked = false
+HookNampowerIfPresent = function()
+    if nampowerHooked then return end
+    local didHook = false
+
+    -- Hook the explicit Nampower queue function (used in /run macros).
+    if type(QueueSpellByName) == "function" then
+        local Original_QueueSpellByName = QueueSpellByName
+        QueueSpellByName = function(spellName)
+            if LibramSwapEnabled and type(spellName) == "string" then
+                local base = SplitNameAndRank(spellName)
+                if base and SpellHasLibramMapping(base) then
+                    if not QueueLibramSwap(base) then
+                        -- Fallback if QueueScript isn't available for some reason
+                        local libram = ResolveLibramForSpell(base)
+                        if libram and IsSpellReady(spellName) then
+                            if base == "Judgement" then
+                                local hp = TargetHealthPct()
+                                if hp and hp <= 35 then EquipLibramForSpell(base, libram) end
+                            else
+                                EquipLibramForSpell(base, libram)
+                            end
+                        end
+                    end
+                end
+            end
+            return Original_QueueSpellByName(spellName)
+        end
+        didHook = true
+    end
+
+    -- Hook the "never queue" cast helper (also from Nampower).
+    if type(CastSpellByNameNoQueue) == "function" then
+        local Original_CastSpellByNameNoQueue = CastSpellByNameNoQueue
+        CastSpellByNameNoQueue = function(spellName)
+            if LibramSwapEnabled and type(spellName) == "string" then
+                local base = SplitNameAndRank(spellName)
+                if base and SpellHasLibramMapping(base) then
+                    local libram = ResolveLibramForSpell(base)
+                    if libram and IsSpellReady(spellName) then
+                        if base == "Judgement" then
+                            local hp = TargetHealthPct()
+                            if hp and hp <= 35 then EquipLibramForSpell(base, libram) end
+                        else
+                            EquipLibramForSpell(base, libram)
+                        end
+                    end
+                end
+            end
+            return Original_CastSpellByNameNoQueue(spellName)
+        end
+        didHook = true
+    end
+
+    nampowerHooked = didHook
+end
+
+-- =====================
 -- Hooks (CastSpellByName / CastSpell)
 -- =====================
 local Original_CastSpellByName = CastSpellByName
 function CastSpellByName(spellName, bookType)
-    if LibramSwapEnabled then
-        local base = SplitNameAndRank(spellName)    -- base only for map/throttles
-        local libram = ResolveLibramForSpell(base)
-        if libram and IsSpellReady(spellName) then  -- rank-aware readiness
-            if base == "Judgement" then
-                local hp = TargetHealthPct()
-                if hp and hp <= 35 then
-                    EquipLibramForSpell(base, libram)
+    if LibramSwapEnabled and type(spellName) == "string" then
+        local base = SplitNameAndRank(spellName) -- base only for map/throttles
+        if base and SpellHasLibramMapping(base) then
+            -- If Nampower is installed, QueueScript will make the swap happen in the
+            -- same queue window as the cast (fixes queued casts using the wrong libram).
+            if not QueueLibramSwap(base) then
+                local libram = ResolveLibramForSpell(base)
+                if libram and IsSpellReady(spellName) then -- rank-aware readiness
+                    if base == "Judgement" then
+                        local hp = TargetHealthPct()
+                        if hp and hp <= 35 then EquipLibramForSpell(base, libram) end
+                    else
+                        EquipLibramForSpell(base, libram)
+                    end
                 end
-            else
-                EquipLibramForSpell(base, libram)
             end
         end
     end
@@ -346,17 +451,19 @@ function CastSpell(spellIndex, bookType)
     if LibramSwapEnabled and bookType == BOOKTYPE_SPELL then
         local name, rank = GetSpellName(spellIndex, BOOKTYPE_SPELL)
         if name then
-            local libram = ResolveLibramForSpell(name)  -- base name for map
-            if libram then
-                local spec = (rank and rank ~= "") and (name .. "(" .. rank .. ")") or name
-                if IsSpellReady(spec) then              -- exact-rank readiness
-                    if name == "Judgement" then
-                        local hp = TargetHealthPct()
-                        if hp and hp <= 35 then
-                            EquipLibramForSpell(name, libram)
+            if SpellHasLibramMapping(name) then
+                if not QueueLibramSwap(name) then
+                    local libram = ResolveLibramForSpell(name) -- base name for map
+                    if libram then
+                        local spec = (rank and rank ~= "") and (name .. "(" .. rank .. ")") or name
+                        if IsSpellReady(spec) then -- exact-rank readiness
+                            if name == "Judgement" then
+                                local hp = TargetHealthPct()
+                                if hp and hp <= 35 then EquipLibramForSpell(name, libram) end
+                            else
+                                EquipLibramForSpell(name, libram)
+                            end
                         end
-                    else
-                        EquipLibramForSpell(name, libram)
                     end
                 end
             end
