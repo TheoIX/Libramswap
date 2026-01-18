@@ -420,6 +420,26 @@ HookNampowerIfPresent = function()
     nampowerHooked = didHook
 end
 
+-- ====================
+-- Hidden Tooltip jank (needed to read spell names from action bar presses)
+-- ====================
+local hiddenActionTooltip = CreateFrame("GameTooltip", "LibramSwapActionTooltip", UIParent, "GameTooltipTemplate")
+hiddenActionTooltip:Hide()
+
+local function GetActionSpellName(slot)
+    if not slot then return nil, nil end
+
+    hiddenActionTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+    hiddenActionTooltip:ClearLines()
+    hiddenActionTooltip:SetAction(slot)
+
+    local name = LibramSwapActionTooltipTextLeft1 and LibramSwapActionTooltipTextLeft1:GetText()
+    local rank = LibramSwapActionTooltipTextRight1 and LibramSwapActionTooltipTextRight1:GetText()
+
+    hiddenActionTooltip:Hide()
+    return name, rank
+end
+
 -- =====================
 -- Hooks (CastSpellByName / CastSpell)
 -- =====================
@@ -447,6 +467,7 @@ function CastSpellByName(spellName, bookType)
 end
 
 local Original_CastSpell = CastSpell
+local Original_UseAction = UseAction
 function CastSpell(spellIndex, bookType)
     if LibramSwapEnabled and bookType == BOOKTYPE_SPELL then
         local name, rank = GetSpellName(spellIndex, BOOKTYPE_SPELL)
@@ -470,6 +491,39 @@ function CastSpell(spellIndex, bookType)
         end
     end
     return Original_CastSpell(spellIndex, bookType)
+end
+
+
+-- Hook: UseAction (used by action bar clicks and keybinds)
+function UseAction(slot, checkCursor, onSelf)
+    -- If this action is a macro, let the CastSpellByName/CastSpell hooks handle it.
+    if GetActionText and GetActionText(slot) then
+        return Original_UseAction(slot, checkCursor, onSelf)
+    end
+
+    if LibramSwapEnabled and slot then
+        local name, rank = GetActionSpellName(slot)
+        if name and SpellHasLibramMapping(name) then
+            -- If Nampower is installed, QueueScript will make the swap happen in the
+            -- same queue window as the cast (fixes queued casts using the wrong libram).
+            if not QueueLibramSwap(name) then
+                local libram = ResolveLibramForSpell(name)
+                if libram then
+                    local spec = (rank and rank ~= "") and (name .. "(" .. rank .. ")") or name
+                    if IsSpellReady(spec) then
+                        if name == "Judgement" then
+                            local hp = TargetHealthPct()
+                            if hp and hp <= 35 then EquipLibramForSpell(name, libram) end
+                        else
+                            EquipLibramForSpell(name, libram)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return Original_UseAction(slot, checkCursor, onSelf)
 end
 
 -- =====================
@@ -503,4 +557,5 @@ SlashCmdList["CONSECLIBRAM"] = function(msg)
     local active = (LibramConsecrationMode == "farraki") and CONSECRATION_FARRAKI or CONSECRATION_FAITHFUL
     DEFAULT_CHAT_FRAME:AddMessage("|cFFAAAAFF[LibramSwap]: Consecration libram set to|r " .. active)
 end
+
 
